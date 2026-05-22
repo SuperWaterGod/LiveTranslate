@@ -59,6 +59,7 @@ def install_update(base_dir: Path, asset_url: str, asset_name: str) -> None:
         "launcher_config.json",
         "runtime",
         "setup.log",
+        "startup.log",
         "transcripts",
         "user_settings.json",
         UPDATER_EXECUTABLE,

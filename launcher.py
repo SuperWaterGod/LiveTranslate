@@ -7,6 +7,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from app_info import (
@@ -58,6 +59,51 @@ def run_checked(args: list[str], cwd: Path, log_file: Path) -> None:
         raise RuntimeError(f"Command failed with exit code {proc.returncode}: {' '.join(args)}")
 
 
+def run_streamed(
+    args: list[str],
+    cwd: Path,
+    log_file: Path,
+    emit,
+    stop_event: threading.Event | None = None,
+    current_proc: dict | None = None,
+) -> None:
+    with log_file.open("a", encoding="utf-8") as log:
+        log.write(f"\n> {' '.join(args)}\n")
+        log.flush()
+        proc = subprocess.Popen(
+            args,
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+        )
+        if current_proc is not None:
+            current_proc["proc"] = proc
+        try:
+            assert proc.stdout is not None
+            while True:
+                if stop_event is not None and stop_event.is_set():
+                    proc.terminate()
+                    raise RuntimeError("Installation cancelled.")
+                line = proc.stdout.readline()
+                if line:
+                    log.write(line)
+                    log.flush()
+                    emit(line.rstrip("\r\n"))
+                    continue
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.1)
+            rc = proc.wait()
+            if rc != 0:
+                raise RuntimeError(f"Command failed with exit code {rc}: {' '.join(args)}")
+        finally:
+            if current_proc is not None:
+                current_proc["proc"] = None
+
+
 def launch_python(python_exe: Path, script: Path, base_dir: Path) -> int:
     if not python_exe.exists():
         show_message(APP_NAME, f"Missing runtime executable: {python_exe}")
@@ -67,13 +113,22 @@ def launch_python(python_exe: Path, script: Path, base_dir: Path) -> int:
         return 1
     env = os.environ.copy()
     env["LIVETRANSLATE_HOME"] = str(base_dir)
-    proc = subprocess.Popen(
-        [str(python_exe), str(script)],
-        cwd=str(script.parent),
-        env=env,
-        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
-    )
-    return proc.wait()
+    startup_log = base_dir / "startup.log"
+    with startup_log.open("a", encoding="utf-8") as log:
+        log.write(f"\n> {python_exe} {script}\n")
+        log.flush()
+        proc = subprocess.Popen(
+            [str(python_exe), str(script)],
+            cwd=str(script.parent),
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+        )
+        try:
+            return proc.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            return 0
 
 
 def apply_pending_updater(base_dir: Path) -> None:
@@ -273,7 +328,7 @@ def ensure_pip(python_exe: Path, runtime_dir: Path, log_file: Path) -> None:
     run_checked([str(python_exe), str(get_pip), "--no-warn-script-location"], runtime_dir, log_file)
 
 
-def ensure_dependencies(base_dir: Path, install_config: dict | None = None, status_cb=None) -> None:
+def ensure_dependencies(base_dir: Path, install_config: dict | None = None, status_cb=None, stop_event: threading.Event | None = None, current_proc: dict | None = None) -> None:
     runtime_dir = base_dir / RUNTIME_DIR
     app_dir = base_dir / APP_DIR
     python_exe = runtime_dir / MAIN_EXECUTABLE
@@ -308,14 +363,17 @@ def ensure_dependencies(base_dir: Path, install_config: dict | None = None, stat
 
     if status_cb:
         status_cb("Upgrading pip...")
-    run_checked(
+    run_streamed(
         with_pip_index([str(python_exe), "-m", "pip", "install", "--upgrade", "pip"], pip_index),
         runtime_dir,
         log_file,
+        status_cb or (lambda _: None),
+        stop_event=stop_event,
+        current_proc=current_proc,
     )
     if status_cb:
         status_cb("Installing torch...")
-    run_checked(
+    run_streamed(
         [
             str(python_exe),
             "-m",
@@ -328,27 +386,36 @@ def ensure_dependencies(base_dir: Path, install_config: dict | None = None, stat
         ],
         runtime_dir,
         log_file,
+        status_cb or (lambda _: None),
+        stop_event=stop_event,
+        current_proc=current_proc,
     )
     if status_cb:
         status_cb("Installing app dependencies...")
-    run_checked(
+    run_streamed(
         with_pip_index([str(python_exe), "-m", "pip", "install", "-r", str(requirements)], pip_index),
         runtime_dir,
         log_file,
+        status_cb or (lambda _: None),
+        stop_event=stop_event,
+        current_proc=current_proc,
     )
     if status_cb:
         status_cb("Installing FunASR...")
-    run_checked(
+    run_streamed(
         with_pip_index([str(python_exe), "-m", "pip", "install", "funasr", "--no-deps"], pip_index),
         runtime_dir,
         log_file,
+        status_cb or (lambda _: None),
+        stop_event=stop_event,
+        current_proc=current_proc,
     )
     stamp.write_text(APP_VERSION, encoding="utf-8")
 
 
-def start_application(base_dir: Path, install_config: dict | None = None, status_cb=None) -> int:
+def start_application(base_dir: Path, install_config: dict | None = None, status_cb=None, stop_event: threading.Event | None = None, current_proc: dict | None = None) -> int:
     try:
-        ensure_dependencies(base_dir, install_config=install_config, status_cb=status_cb)
+        ensure_dependencies(base_dir, install_config=install_config, status_cb=status_cb, stop_event=stop_event, current_proc=current_proc)
     except Exception as exc:
         show_message(APP_NAME, f"Dependency setup failed: {exc}\n\nSee setup.log for details.")
         return 1
@@ -382,6 +449,10 @@ def show_progress_window(base_dir: Path) -> int:
     ttk.Label(root, text=APP_NAME, font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=16, pady=(16, 6))
 
     selected = {"pip_index_url": saved.get("pip_index_url", ""), "torch_choice": saved.get("torch_choice")}
+    running = {"value": False}
+    stop_event = threading.Event()
+    current_proc: dict = {"proc": None}
+    log_text = None
 
     if first_install:
         ttk.Label(root, text="First startup needs to install runtime dependencies.", wraplength=600).pack(anchor="w", padx=16)
@@ -419,6 +490,13 @@ def show_progress_window(base_dir: Path) -> int:
         button_row.pack(fill="x", padx=16, pady=(4, 8))
         start_button = ttk.Button(button_row, text="Install and start")
         start_button.pack(side="right")
+        cancel_button = ttk.Button(button_row, text="Exit")
+        cancel_button.pack(side="right", padx=(0, 8))
+
+        log_frame = ttk.LabelFrame(root, text="Install log")
+        log_frame.pack(fill="both", expand=True, padx=16, pady=(4, 8))
+        log_text = tk.Text(log_frame, height=8, wrap="none", state="disabled")
+        log_text.pack(fill="both", expand=True, padx=8, pady=8)
 
     ttk.Label(root, textvariable=status, wraplength=600).pack(anchor="w", padx=16, pady=(6, 0))
     bar = ttk.Progressbar(root, mode="indeterminate")
@@ -434,6 +512,14 @@ def show_progress_window(base_dir: Path) -> int:
     def set_status(text: str) -> None:
         q.put(("status", text))
 
+    def append_log(text: str) -> None:
+        if log_text is None:
+            return
+        log_text.configure(state="normal")
+        log_text.insert("end", text + "\n")
+        log_text.see("end")
+        log_text.configure(state="disabled")
+
     def worker() -> None:
         try:
             install_config = None
@@ -446,7 +532,15 @@ def show_progress_window(base_dir: Path) -> int:
                         "torch_choice": torch_var.get(),
                     },
                 )
-            result["code"] = start_application(base_dir, install_config=install_config, status_cb=set_status)
+            result["code"] = start_application(
+                base_dir,
+                install_config=install_config,
+                status_cb=set_status,
+                stop_event=stop_event,
+                current_proc=current_proc,
+            )
+            if result["code"] == 0:
+                q.put(("status", "Starting application..."))
         except Exception as exc:
             q.put(("error", str(exc)))
             result["code"] = 1
@@ -459,6 +553,7 @@ def show_progress_window(base_dir: Path) -> int:
                 kind, value = q.get_nowait()
                 if kind == "status" and value:
                     status.set(value)
+                    append_log(value)
                 elif kind == "error" and value:
                     show_message(APP_NAME, value)
                 elif kind == "done":
@@ -471,11 +566,38 @@ def show_progress_window(base_dir: Path) -> int:
     def begin_install() -> None:
         if first_install:
             start_button.configure(state="disabled")
+            cancel_button.configure(state="disabled")
+            pip_frame.configure(state="disabled")
+            torch_frame.configure(state="disabled")
         bar.start(12)
+        running["value"] = True
         threading.Thread(target=worker, daemon=True).start()
 
+    def request_close() -> None:
+        if running["value"]:
+            answer = ctypes.windll.user32.MessageBoxW(
+                0,
+                "Installation is in progress. Stop it and exit?",
+                APP_NAME,
+                0x34,
+            )
+            if answer != 6:
+                return
+            stop_event.set()
+            proc = current_proc.get("proc")
+            if proc is not None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            root.destroy()
+            return
+        root.destroy()
+
     if first_install:
+        root.protocol("WM_DELETE_WINDOW", request_close)
         start_button.configure(command=begin_install)
+        cancel_button.configure(command=request_close)
     else:
         threading.Thread(target=worker, daemon=True).start()
     root.after(120, poll)
