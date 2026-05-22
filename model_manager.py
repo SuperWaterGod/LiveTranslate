@@ -5,7 +5,8 @@ from pathlib import Path
 log = logging.getLogger("LiveTranslate.ModelManager")
 
 APP_DIR = Path(__file__).parent
-MODELS_DIR = APP_DIR / "models"
+RUNTIME_ROOT = Path(os.getenv("LIVETRANSLATE_HOME", APP_DIR))
+MODELS_DIR = RUNTIME_ROOT / "models"
 
 ASR_MODEL_IDS = {
     "sensevoice": "iic/SenseVoiceSmall",

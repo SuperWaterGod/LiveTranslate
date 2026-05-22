@@ -1,0 +1,12 @@
+APP_NAME = "LiveTranslate"
+APP_VERSION = "0.0.0"
+GITHUB_REPOSITORY = "TheDeathDragon/LiveTranslate"
+
+WINDOWS_ASSET_TOKEN = "win-x64"
+APP_DIR = "app"
+RUNTIME_DIR = "runtime"
+MAIN_SCRIPT = "main.py"
+MAIN_EXECUTABLE = "python.exe"
+LAUNCHER_EXECUTABLE = "Launcher.exe"
+UPDATER_EXECUTABLE = "Update.exe"
+PENDING_UPDATER = "Update.exe.pending"

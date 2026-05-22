@@ -59,7 +59,8 @@ from i18n import t, set_lang, LANGUAGES, COMMON_LANG_CODES
 
 
 def setup_logging():
-    log_dir = Path(__file__).parent / "logs"
+    runtime_root = Path(os.getenv("LIVETRANSLATE_HOME", Path(__file__).parent))
+    log_dir = runtime_root / "logs"
     log_dir.mkdir(exist_ok=True)
     log_file = log_dir / f"livetrans_{datetime.now():%Y%m%d_%H%M%S}.log"
 
@@ -179,7 +180,8 @@ class LiveTranslateApp:
         self._asr_queue = queue.Queue(maxsize=16)
         self._tl_executor = ThreadPoolExecutor(max_workers=8)
 
-        self._transcript = TranscriptWriter(Path(__file__).parent / "transcripts")
+        runtime_root = Path(os.getenv("LIVETRANSLATE_HOME", Path(__file__).parent))
+        self._transcript = TranscriptWriter(runtime_root / "transcripts")
 
         # Memory diagnostic state
         import psutil

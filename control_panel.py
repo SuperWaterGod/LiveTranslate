@@ -43,7 +43,9 @@ from subtitle_settings import SubtitleSettingsWidget
 
 log = logging.getLogger("LiveTranslate.Panel")
 
-SETTINGS_FILE = Path(__file__).parent / "user_settings.json"
+APP_DIR = Path(__file__).parent
+RUNTIME_ROOT = Path(os.getenv("LIVETRANSLATE_HOME", APP_DIR))
+SETTINGS_FILE = RUNTIME_ROOT / "user_settings.json"
 
 
 def _load_saved_settings() -> dict | None:
@@ -946,8 +948,7 @@ class ControlPanel(QWidget):
         return widget
 
     def _open_transcripts_folder(self):
-        from pathlib import Path
-        ts_dir = Path(__file__).parent / "transcripts"
+        ts_dir = RUNTIME_ROOT / "transcripts"
         ts_dir.mkdir(parents=True, exist_ok=True)
         os.startfile(str(ts_dir))
 
