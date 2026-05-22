@@ -65,6 +65,7 @@ jobs:
       - name: Assemble release package
         shell: pwsh
         run: |
+          if (Test-Path "${{ env.RELEASE_DIR }}") { Remove-Item "${{ env.RELEASE_DIR }}" -Recurse -Force }
           New-Item -ItemType Directory -Force "${{ env.RELEASE_DIR }}" | Out-Null
           New-Item -ItemType Directory -Force "${{ env.RELEASE_DIR }}\runtime" | Out-Null
           New-Item -ItemType Directory -Force "${{ env.RELEASE_DIR }}\app" | Out-Null
@@ -89,8 +90,10 @@ jobs:
             $shortSha = "${{ github.sha }}".Substring(0, 7)
             $tag = "v0.0.0-ci.$shortSha"
           }
-          Compress-Archive -Path "${{ env.RELEASE_DIR }}\*" -DestinationPath "LiveTranslate-$tag-win-x64.zip" -Force
-          Get-FileHash "LiveTranslate-$tag-win-x64.zip" -Algorithm SHA256 | Format-Table -AutoSize
+          $zipName = "LiveTranslate-$tag-win-x64.zip"
+          if (Test-Path $zipName) { Remove-Item $zipName -Force }
+          Compress-Archive -Path "${{ env.RELEASE_DIR }}\*" -DestinationPath $zipName -Force
+          Get-FileHash $zipName -Algorithm SHA256 | Format-Table -AutoSize
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

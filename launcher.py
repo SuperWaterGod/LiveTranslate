@@ -3,8 +3,10 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import queue
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from app_info import (
@@ -14,6 +16,7 @@ from app_info import (
     GITHUB_REPOSITORY,
     LAUNCHER_EXECUTABLE,
     MAIN_EXECUTABLE,
+    MAIN_GUI_EXECUTABLE,
     MAIN_SCRIPT,
     PENDING_UPDATER,
     RUNTIME_DIR,
@@ -52,7 +55,13 @@ def run_checked(args: list[str], cwd: Path, log_file: Path) -> None:
     with log_file.open("a", encoding="utf-8") as log:
         log.write(f"\n> {' '.join(args)}\n")
         log.flush()
-        proc = subprocess.run(args, cwd=str(cwd), stdout=log, stderr=subprocess.STDOUT)
+        proc = subprocess.run(
+            args,
+            cwd=str(cwd),
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+        )
     if proc.returncode != 0:
         raise RuntimeError(f"Command failed with exit code {proc.returncode}: {' '.join(args)}")
 
@@ -66,7 +75,12 @@ def launch_python(python_exe: Path, script: Path, base_dir: Path) -> int:
         return 1
     env = os.environ.copy()
     env["LIVETRANSLATE_HOME"] = str(base_dir)
-    proc = subprocess.Popen([str(python_exe), str(script)], cwd=str(script.parent), env=env)
+    proc = subprocess.Popen(
+        [str(python_exe), str(script)],
+        cwd=str(script.parent),
+        env=env,
+        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+    )
     return proc.wait()
 
 
@@ -211,6 +225,14 @@ def with_pip_index(args: list[str], index_url: str | None) -> list[str]:
     return args
 
 
+def _gui_python(base_dir: Path) -> Path:
+    runtime_dir = base_dir / RUNTIME_DIR
+    gui_python = runtime_dir / MAIN_GUI_EXECUTABLE
+    if gui_python.exists():
+        return gui_python
+    return runtime_dir / MAIN_EXECUTABLE
+
+
 def ensure_pip(python_exe: Path, runtime_dir: Path, log_file: Path) -> None:
     if python_has_module(python_exe, "pip"):
         return
@@ -220,7 +242,7 @@ def ensure_pip(python_exe: Path, runtime_dir: Path, log_file: Path) -> None:
     run_checked([str(python_exe), str(get_pip), "--no-warn-script-location"], runtime_dir, log_file)
 
 
-def ensure_dependencies(base_dir: Path) -> None:
+def ensure_dependencies(base_dir: Path, status_cb=None) -> None:
     runtime_dir = base_dir / RUNTIME_DIR
     app_dir = base_dir / APP_DIR
     python_exe = runtime_dir / MAIN_EXECUTABLE
@@ -236,21 +258,30 @@ def ensure_dependencies(base_dir: Path) -> None:
     if not requirements.exists():
         raise RuntimeError(f"Missing requirements file: {requirements}")
 
-    show_message(
-        APP_NAME,
-        "First startup will install Python dependencies. This may take several minutes.",
-    )
+    if status_cb:
+        status_cb("First startup will install Python dependencies. This may take several minutes.")
+    else:
+        show_message(
+            APP_NAME,
+            "First startup will install Python dependencies. This may take several minutes.",
+        )
 
     runtime_dir.mkdir(parents=True, exist_ok=True)
     enable_embedded_site(runtime_dir)
+    if status_cb:
+        status_cb("Checking pip...")
     ensure_pip(python_exe, runtime_dir, log_file)
     pip_index = select_pip_index(base_dir)
 
+    if status_cb:
+        status_cb("Upgrading pip...")
     run_checked(
         with_pip_index([str(python_exe), "-m", "pip", "install", "--upgrade", "pip"], pip_index),
         runtime_dir,
         log_file,
     )
+    if status_cb:
+        status_cb("Installing torch...")
     run_checked(
         [
             str(python_exe),
@@ -265,11 +296,15 @@ def ensure_dependencies(base_dir: Path) -> None:
         runtime_dir,
         log_file,
     )
+    if status_cb:
+        status_cb("Installing app dependencies...")
     run_checked(
         with_pip_index([str(python_exe), "-m", "pip", "install", "-r", str(requirements)], pip_index),
         runtime_dir,
         log_file,
     )
+    if status_cb:
+        status_cb("Installing FunASR...")
     run_checked(
         with_pip_index([str(python_exe), "-m", "pip", "install", "funasr", "--no-deps"], pip_index),
         runtime_dir,
@@ -278,14 +313,69 @@ def ensure_dependencies(base_dir: Path) -> None:
     stamp.write_text(APP_VERSION, encoding="utf-8")
 
 
-def start_application(base_dir: Path) -> int:
+def start_application(base_dir: Path, status_cb=None) -> int:
     try:
-        ensure_dependencies(base_dir)
+        ensure_dependencies(base_dir, status_cb=status_cb)
     except Exception as exc:
         show_message(APP_NAME, f"Dependency setup failed: {exc}\n\nSee setup.log for details.")
         return 1
 
-    return launch_python(base_dir / RUNTIME_DIR / MAIN_EXECUTABLE, base_dir / APP_DIR / MAIN_SCRIPT, base_dir)
+    return launch_python(_gui_python(base_dir), base_dir / APP_DIR / MAIN_SCRIPT, base_dir)
+
+
+def show_progress_window(base_dir: Path) -> int:
+    try:
+        import tkinter as tk
+        from tkinter import ttk
+    except Exception:
+        return start_application(base_dir)
+
+    root = tk.Tk()
+    root.title(APP_NAME)
+    root.geometry("560x180")
+    root.resizable(False, False)
+
+    status = tk.StringVar(value="Preparing...")
+    ttk.Label(root, text=APP_NAME, font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=16, pady=(16, 6))
+    ttk.Label(root, textvariable=status, wraplength=520).pack(anchor="w", padx=16)
+    bar = ttk.Progressbar(root, mode="indeterminate")
+    bar.pack(fill="x", padx=16, pady=16)
+    bar.start(12)
+
+    result = {"code": 0}
+    q: queue.Queue[tuple[str, str | None]] = queue.Queue()
+
+    def set_status(text: str) -> None:
+        q.put(("status", text))
+
+    def worker() -> None:
+        try:
+            result["code"] = start_application(base_dir, status_cb=set_status)
+        except Exception as exc:
+            q.put(("error", str(exc)))
+            result["code"] = 1
+        finally:
+            q.put(("done", None))
+
+    def poll() -> None:
+        try:
+            while True:
+                kind, value = q.get_nowait()
+                if kind == "status" and value:
+                    status.set(value)
+                elif kind == "error" and value:
+                    show_message(APP_NAME, value)
+                elif kind == "done":
+                    root.destroy()
+                    return
+        except queue.Empty:
+            pass
+        root.after(120, poll)
+
+    threading.Thread(target=worker, daemon=True).start()
+    root.after(120, poll)
+    root.mainloop()
+    return int(result["code"])
 
 
 def main() -> int:
@@ -307,7 +397,7 @@ def main() -> int:
     if asset and latest_tag and not same_version(APP_VERSION, latest_tag):
         return start_updater(base_dir, asset.url, asset.name, latest_tag)
 
-    return start_application(base_dir)
+    return show_progress_window(base_dir)
 
 
 if __name__ == "__main__":
