@@ -1,0 +1,106 @@
+name: build-and-release
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_VERSION: "3.10"
+  EMBED_PYTHON_VERSION: "3.10.11"
+  APP_NAME: "LiveTranslate"
+  RELEASE_DIR: release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set build version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if (-not $tag -or -not $tag.StartsWith("v")) {
+            $shortSha = "${{ github.sha }}".Substring(0, 7)
+            $tag = "v0.0.0-ci.$shortSha"
+          }
+          (Get-Content app_info.py -Raw) `
+            -replace 'APP_VERSION = ".*?"', "APP_VERSION = `"$tag`"" `
+            | Set-Content app_info.py -Encoding UTF8
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller
+
+      - name: Build launcher and updater
+        shell: pwsh
+        run: |
+          pyinstaller --onefile --noconsole --name Launcher launcher.py
+          pyinstaller --onefile --noconsole --name Update updater.py
+
+      - name: Download embedded Python
+        shell: pwsh
+        run: |
+          $version = "${{ env.EMBED_PYTHON_VERSION }}"
+          $url = "https://www.python.org/ftp/python/$version/python-$version-embed-amd64.zip"
+          Invoke-WebRequest $url -OutFile "python-embed.zip"
+          New-Item -ItemType Directory -Force "python-embed" | Out-Null
+          Expand-Archive "python-embed.zip" -DestinationPath "python-embed" -Force
+
+      - name: Assemble release package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "${{ env.RELEASE_DIR }}" | Out-Null
+          New-Item -ItemType Directory -Force "${{ env.RELEASE_DIR }}\runtime" | Out-Null
+          New-Item -ItemType Directory -Force "${{ env.RELEASE_DIR }}\app" | Out-Null
+          Copy-Item "dist\Launcher.exe" "${{ env.RELEASE_DIR }}\Launcher.exe" -Force
+          Copy-Item "dist\Update.exe" "${{ env.RELEASE_DIR }}\Update.exe" -Force
+          Copy-Item "python-embed\*" "${{ env.RELEASE_DIR }}\runtime" -Recurse -Force
+          $appFiles = @(
+            "*.py",
+            "requirements.txt",
+            "config.yaml",
+            "README.md",
+            "README_zh.md",
+            "LICENSE"
+          )
+          foreach ($pattern in $appFiles) {
+            Copy-Item $pattern "${{ env.RELEASE_DIR }}\app" -Force
+          }
+          Copy-Item "i18n" "${{ env.RELEASE_DIR }}\app\i18n" -Recurse -Force
+          Copy-Item "funasr_nano" "${{ env.RELEASE_DIR }}\app\funasr_nano" -Recurse -Force
+          $tag = "${{ github.ref_name }}"
+          if (-not $tag -or -not $tag.StartsWith("v")) {
+            $shortSha = "${{ github.sha }}".Substring(0, 7)
+            $tag = "v0.0.0-ci.$shortSha"
+          }
+          Compress-Archive -Path "${{ env.RELEASE_DIR }}\*" -DestinationPath "LiveTranslate-$tag-win-x64.zip" -Force
+          Get-FileHash "LiveTranslate-$tag-win-x64.zip" -Algorithm SHA256 | Format-Table -AutoSize
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiveTranslate-win-x64
+          path: LiveTranslate-*-win-x64.zip
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: LiveTranslate-*-win-x64.zip
+          generate_release_notes: true
