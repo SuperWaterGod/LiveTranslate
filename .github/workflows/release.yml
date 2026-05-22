@@ -94,11 +94,13 @@ jobs:
           if (Test-Path $zipName) { Remove-Item $zipName -Force }
           Compress-Archive -Path "${{ env.RELEASE_DIR }}\*" -DestinationPath $zipName -Force
           Get-FileHash $zipName -Algorithm SHA256 | Format-Table -AutoSize
+          "PACKAGE_NAME=$zipName" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PACKAGE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LiveTranslate-win-x64
+          name: LiveTranslate-${{ env.PACKAGE_TAG }}-win-x64
           path: ${{ env.RELEASE_DIR }}
           if-no-files-found: error
 
